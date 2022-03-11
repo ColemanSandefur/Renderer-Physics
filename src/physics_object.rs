@@ -1,5 +1,6 @@
 use crate::nalgebra::Point3;
 use crate::PhysicsDebug;
+use egui::Slider;
 use opengl_render::cgmath::Rad;
 use opengl_render::gui::DebugGUI;
 use opengl_render::gui::DebugGUIFormat;
@@ -47,12 +48,6 @@ impl PhysicsObject {
             let trans = rigid_body.translation();
             self.shape.set_translation([trans.x, trans.y, trans.z]);
 
-            //let (axis, angle): ([f32; 3], Rad<f32>) = match rigid_body.rotation().axis_angle() {
-            //Some((axis, angle)) => (axis.into_inner().into(), Rad(angle)),
-            //None => ([0.0; 3], Rad(rigid_body.rotation().angle())),
-            //};
-
-            //self.shape.set_rotation_axis_angle(axis, angle);
             let (roll, pitch, yaw) = rigid_body.rotation().euler_angles();
             self.shape
                 .set_rotation_euler(Rad(yaw), Rad(pitch), Rad(roll));
@@ -91,9 +86,6 @@ impl PhysicsObject {
         rigid_body.set_rotation(vector![rot_x, rot_y, rot_z], true);
         let rigid_body_handle = rigid_body_set.insert(rigid_body);
 
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
         for segment in model.get_segments() {
             let vertex = segment.get_vertex_buffer().read().unwrap();
             let index = segment.get_index_buffer().read().unwrap();
@@ -105,24 +97,24 @@ impl PhysicsObject {
 
             let mut tmp_indices: Vec<_> = index
                 .chunks(3)
-                //.map(|chunk| [chunk[0], chunk[1], chunk[2]])
                 .map(|chunk| [chunk[2], chunk[1], chunk[0]])
                 .collect();
 
-            concat_buffers(
-                (&mut vertices, &mut indices),
-                (&mut tmp_vertices, &mut tmp_indices),
-            );
+            let collider = ColliderBuilder::convex_decomposition(&tmp_vertices, &tmp_indices)
+                .restitution(0.1)
+                .friction(1.0)
+                .build();
+            collider_set.insert_with_parent(collider, rigid_body_handle, rigid_body_set);
         }
 
         // Create a rough outline of the model
-        let collider = ColliderBuilder::convex_decomposition(&vertices, &indices)
-            .restitution(0.0)
-            .friction(1.0)
-            //.density(1000.0)
-            .build();
+        //let collider = ColliderBuilder::convex_decomposition(&vertices, &indices)
+        //.restitution(0.0)
+        //.friction(1.0)
+        ////.density(1000.0)
+        //.build();
 
-        collider_set.insert_with_parent(collider, rigid_body_handle, rigid_body_set);
+        //collider_set.insert_with_parent(collider, rigid_body_handle, rigid_body_set);
 
         let rigid_body = rigid_body_set.get_mut(rigid_body_handle).unwrap();
         println!(
@@ -149,7 +141,17 @@ impl PhysicsObject {
         }
     }
 
-    pub fn get_rigid_body<'a>(
+    /// Gets rigid body
+    ///
+    /// Will return none if RigidBodySet doesn't contain the RigidBody
+    pub fn get_rigid_body<'a>(&'a self, rigid_body_set: &'a RigidBodySet) -> Option<&'a RigidBody> {
+        rigid_body_set.get(self.rigid_body_handle)
+    }
+
+    /// Gets rigid body
+    ///
+    /// Will return none if RigidBodySet doesn't contain the RigidBody
+    pub fn get_rigid_body_mut<'a>(
         &'a self,
         rigid_body_set: &'a mut RigidBodySet,
     ) -> Option<&'a mut RigidBody> {
@@ -161,12 +163,22 @@ impl PhysicsObject {
         rigid_body_set: &mut RigidBodySet,
         func: impl FnOnce(Option<&mut RigidBody>) -> T,
     ) -> T {
-        func(self.get_rigid_body(rigid_body_set))
+        func(self.get_rigid_body_mut(rigid_body_set))
+    }
+
+    pub fn get_rigid_body_handle(&self) -> RigidBodyHandle {
+        self.rigid_body_handle
     }
 }
 
 impl PhysicsDebug for PhysicsObject {
-    fn debug(&mut self, ui: &mut egui::Ui, rigid_body_set: &mut RigidBodySet) {
+    fn debug(
+        &mut self,
+        ui: &mut egui::Ui,
+        rigid_body_set: &mut RigidBodySet,
+        collider_set: &mut ColliderSet,
+    ) {
+        // Show debug info for each material assigned to the model
         ui.collapsing("Material Properties", |ui| {
             let material_segments = self.shape.get_segments_mut();
 
@@ -179,74 +191,40 @@ impl PhysicsDebug for PhysicsObject {
             }
         });
 
+        // Show physics debug info
         if let Some(rigid_body) = rigid_body_set.get_mut(self.rigid_body_handle) {
+            ui.collapsing("Colliders", |ui| {
+                debug_colliders(ui, rigid_body.colliders(), collider_set);
+            });
             egui::CollapsingHeader::new("Physics").show(ui, |ui| {
-                let mut rotation_lock = rigid_body.is_rotation_locked();
-                let mut translation_lock = rigid_body.is_translation_locked();
-                let mut position: [f32; 3] = rigid_body.translation().xyz().into();
-
-                // Roll, pitch, yaw
-                let mut rotation: [f32; 3] = {
-                    let (roll, pitch, yaw) = rigid_body.rotation().euler_angles();
-
-                    [roll, pitch, yaw]
-                };
-
-                ui.group(|ui| {
-                    // Lock and unlock rigid_body translations
-                    if ui
-                        .checkbox(&mut translation_lock, "Lock Translation")
-                        .changed()
-                    {
-                        rigid_body.lock_translations(translation_lock, true);
-                    };
-
-                    // add_invisible_ui in egui 0.17
-                    // To avoid undefined behavior, translation lock must be enabled
-                    // once it is enabled the user will be able to interact with the ui
-                    ui.add_enabled_ui(translation_lock, |ui| {
-                        if DebugGUIFormat::position(ui, &mut position, -25.0..=25.0) {
-                            rigid_body.set_translation(position.into(), true);
-                        }
+                let mut body_type = rigid_body.body_type().clone();
+                egui::ComboBox::from_label("Physics Type")
+                    .selected_text(format!("{:?}", body_type))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut body_type, RigidBodyType::Dynamic, "Dynamic");
+                        ui.selectable_value(&mut body_type, RigidBodyType::Static, "Static");
+                        ui.selectable_value(
+                            &mut body_type,
+                            RigidBodyType::KinematicPositionBased,
+                            "Kinematic Position",
+                        );
+                        ui.selectable_value(
+                            &mut body_type,
+                            RigidBodyType::KinematicVelocityBased,
+                            "Kinematic Velocity",
+                        );
                     });
-                });
 
-                // Add sliders to edit/show angles
-                if DebugGUIFormat::euler(ui, &mut rotation) {
-                    rigid_body.lock_translations(true, true);
-                    rigid_body.set_rotation(
-                        Unit::from_euler_angles(rotation[0], rotation[1], rotation[2])
-                            .scaled_axis(),
-                        true,
-                    );
-                    rigid_body.lock_translations(translation_lock, true);
+                if body_type != rigid_body.body_type() {
+                    rigid_body.set_body_type(body_type);
                 }
 
-                egui::CollapsingHeader::new("Rotation Lock").show(ui, |ui| {
-                    let mut ui_changed = false;
-                    if ui.checkbox(&mut rotation_lock[0], "x").changed() {
-                        ui_changed = true
-                    }
-                    if ui.checkbox(&mut rotation_lock[1], "y").changed() {
-                        ui_changed = true
-                    }
-                    if ui.checkbox(&mut rotation_lock[2], "z").changed() {
-                        ui_changed = true
-                    }
-
-                    if ui_changed {
-                        rigid_body.restrict_rotations(
-                            rotation_lock[0],
-                            rotation_lock[1],
-                            rotation_lock[2],
-                            true,
-                        );
-                    }
-                });
+                debug_gui(rigid_body, ui);
             });
         }
     }
 }
+
 fn concat_buffers(
     initial: (&mut Vec<Point3<f32>>, &mut Vec<[u32; 3]>),
     append: (&mut Vec<Point3<f32>>, &mut Vec<[u32; 3]>),
@@ -259,4 +237,122 @@ fn concat_buffers(
             .push([i[0] + offset, i[1] + offset, i[2] + offset]);
     }
     initial.0.append(append.0);
+}
+
+fn debug_colliders(
+    ui: &mut egui::Ui,
+    colliders: &[ColliderHandle],
+    collider_set: &mut ColliderSet,
+) {
+    for collider_handle in colliders {
+        if let Some(collider) = collider_set.get_mut(*collider_handle) {
+            let mut restitution = collider.restitution();
+
+            if ui.add(Slider::new(&mut restitution, 0.0..=1.0)).changed() {
+                collider.set_restitution(restitution);
+            }
+
+            let mut friction = collider.friction();
+
+            if ui.add(Slider::new(&mut friction, 0.0..=10.0)).changed() {
+                collider.set_friction(friction);
+            }
+        }
+    }
+}
+
+/// Changes the options available on each body type
+fn debug_gui(rigid_body: &mut RigidBody, ui: &mut egui::Ui) {
+    let mut rotation_lock = rigid_body.is_rotation_locked();
+    let mut translation_lock = rigid_body.is_translation_locked();
+    let mut position: [f32; 3] = rigid_body.translation().xyz().into();
+
+    // Roll, pitch, yaw
+    let mut rotation: [f32; 3] = {
+        let (roll, pitch, yaw) = rigid_body.rotation().euler_angles();
+
+        [roll, pitch, yaw]
+    };
+
+    match rigid_body.body_type() {
+        RigidBodyType::Static => {
+            // Position Data
+            ui.group(|ui| {
+                ui.label("Position");
+                if DebugGUIFormat::position(ui, &mut position, -25.0..=25.0) {
+                    rigid_body.set_translation(position.into(), true);
+                }
+            });
+            // Add sliders to edit/show angles
+            ui.group(|ui| {
+                ui.label("Rotation");
+                if DebugGUIFormat::euler(ui, &mut rotation) {
+                    rigid_body.lock_translations(true, true);
+                    rigid_body.set_rotation(
+                        Unit::from_euler_angles(rotation[0], rotation[1], rotation[2])
+                            .scaled_axis(),
+                        true,
+                    );
+                    rigid_body.lock_translations(translation_lock, true);
+                }
+            });
+        }
+        RigidBodyType::Dynamic => {
+            ui.group(|ui| {
+                ui.label("Position");
+
+                // Lock and unlock rigid_body translations
+                if ui
+                    .checkbox(&mut translation_lock, "Lock Translation")
+                    .changed()
+                {
+                    rigid_body.lock_translations(translation_lock, true);
+                };
+
+                // add_invisible_ui in egui 0.17
+                // To avoid undefined behavior, translation lock must be enabled
+                // once it is enabled the user will be able to interact with the ui
+                ui.add_enabled_ui(translation_lock, |ui| {
+                    if DebugGUIFormat::position(ui, &mut position, -25.0..=25.0) {
+                        rigid_body.set_translation(position.into(), true);
+                    }
+                });
+            });
+            ui.group(|ui| {
+                // Add sliders to edit/show angles
+                ui.label("Rotation");
+                if DebugGUIFormat::euler(ui, &mut rotation) {
+                    rigid_body.lock_translations(true, true);
+                    rigid_body.set_rotation(
+                        Unit::from_euler_angles(rotation[0], rotation[1], rotation[2])
+                            .scaled_axis(),
+                        true,
+                    );
+                    rigid_body.lock_translations(translation_lock, true);
+                }
+            });
+            egui::CollapsingHeader::new("Rotation Lock").show(ui, |ui| {
+                let mut ui_changed = false;
+                if ui.checkbox(&mut rotation_lock[0], "x").changed() {
+                    ui_changed = true
+                }
+                if ui.checkbox(&mut rotation_lock[1], "y").changed() {
+                    ui_changed = true
+                }
+                if ui.checkbox(&mut rotation_lock[2], "z").changed() {
+                    ui_changed = true
+                }
+
+                if ui_changed {
+                    rigid_body.restrict_rotations(
+                        rotation_lock[0],
+                        rotation_lock[1],
+                        rotation_lock[2],
+                        true,
+                    );
+                }
+            });
+        }
+        _ => {}
+    };
 }

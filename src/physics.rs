@@ -56,14 +56,23 @@ impl Physics {
     /// Get both the rigid_body_set, and the collider_set as mutable
     ///
     /// Borrow checker doesn't like borrowing the same variable twice, so this is a workaround.
-    pub fn get_sets_mut(&mut self) -> (&mut RigidBodySet, &mut ColliderSet) {
+    pub fn get_sets_mut(
+        &mut self,
+    ) -> (
+        &mut RigidBodySet,
+        &mut ColliderSet,
+        &mut IslandManager,
+        &mut JointSet,
+    ) {
         let Self {
             rigid_body_set,
             collider_set,
+            island_manager,
+            joint_set,
             ..
         } = self;
 
-        (rigid_body_set, collider_set)
+        (rigid_body_set, collider_set, island_manager, joint_set)
     }
 
     /// Get both the rigid_body_set, and the collider_set as mutable
@@ -73,9 +82,14 @@ impl Physics {
     /// and ColliderSet. Whatever is returned by the closure is returned by this function
     pub fn modify_sets<T>(
         &mut self,
-        func: impl FnOnce(&mut RigidBodySet, &mut ColliderSet) -> T,
+        func: impl FnOnce(&mut RigidBodySet, &mut ColliderSet, &mut IslandManager, &mut JointSet) -> T,
     ) -> T {
-        func(&mut self.rigid_body_set, &mut self.collider_set)
+        func(
+            &mut self.rigid_body_set,
+            &mut self.collider_set,
+            &mut self.island_manager,
+            &mut self.joint_set,
+        )
     }
 
     /// Update the physics for the frame

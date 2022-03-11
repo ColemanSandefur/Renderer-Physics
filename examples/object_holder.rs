@@ -10,6 +10,7 @@ use opengl_render::pbr_model::PbrModel;
 use opengl_render::skybox::Skybox;
 use opengl_render::support::System;
 use opengl_render::{glium::Surface, renderer::Renderer};
+use physics_render::object_holder::ObjectHolder;
 use physics_render::physics::Physics;
 use physics_render::physics_object::PhysicsObject;
 use physics_render::PhysicsDebug;
@@ -42,8 +43,8 @@ fn main() {
     let mut physics = Physics::new([0.0, -9.81, 0.0]);
     let quarter = std::f32::consts::FRAC_PI_4;
 
-    let mut models = vec![
-        // Load the main model
+    let mut models = ObjectHolder::new();
+    models.push(
         physics.modify_sets(|rigid_body_set, collider_set, _islands, _joints| {
             PhysicsObject::new(
                 PbrModel::load_from_fs(model_dir.clone(), &facade, pbr.clone()).unwrap(),
@@ -51,7 +52,8 @@ fn main() {
                 collider_set,
             )
         }),
-        // Load ground
+    );
+    models.push(
         physics.modify_sets(|rigid_body_set, collider_set, _islands, _joints| {
             let ground = PbrModel::load_from_fs(ground_dir.clone(), &facade, pbr.clone()).unwrap();
             let ground = PhysicsObject::new(ground, rigid_body_set, collider_set);
@@ -68,7 +70,7 @@ fn main() {
 
             ground
         }),
-    ];
+    );
 
     // Move the cube upwards
     models[0].modify_rigid_body(physics.get_rigid_body_set_mut(), |rigid_body| {
@@ -114,12 +116,12 @@ fn main() {
                 .add_light(light_pos, light_color);
 
             // new_models is a buffer of new objects to be rendered
-            models.append(&mut new_models);
+            while new_models.len() > 0 {
+                models.push(new_models.pop().unwrap());
+            }
 
             // Render models
-            for model in &mut models {
-                model.render(&mut scene, physics.get_rigid_body_set_mut());
-            }
+            models.render(&mut scene, &mut physics);
 
             scene.finish(&mut frame.into());
 
@@ -178,8 +180,8 @@ fn main() {
                         }
                     });
 
-                    for i in 0..models.len() {
-                        let model = &mut models[i];
+                    for i in 0..models.get_num_objects() {
+                        let model = &mut models.get_object_mut(i).unwrap();
 
                         egui::CollapsingHeader::new(format!("Object {}", i)).show(ui, |ui| {
                             let (rigid_body_set, collider_set, _islands, _joints) =
@@ -199,7 +201,7 @@ fn main() {
 
                     // Remove items from vec (from back to front to not mess up indexing)
                     for i in removed.len() - 1..=0 {
-                        models.remove(removed[i]);
+                        models.remove_physics(removed[i], &mut physics);
                     }
                 });
             });
